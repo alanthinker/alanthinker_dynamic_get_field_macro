@@ -7,7 +7,7 @@ edition = "2021"
 proc-macro = true
 
 [dependencies]
-alanthinker_dynamic_get_field_trait = {path="D:/Projects/My_git_projects/git_projects/RustLang/alanthinker_dynamic_get_field_trait"}
+alanthinker_dynamic_get_field_trait = { git = "https://github.com/alanthinker/alanthinker_dynamic_get_field_trait.git"  }
 proc-macro2 = "*"
 quote = "*"
 inventory = "*"
