@@ -7,10 +7,8 @@ use syn::{
     PatIdent,
 };
 // =======================
-// 1. derive 宏: DynamicGet
+// 宏: DynamicGet
 // =======================
-
-// 然后宏实现：
 #[proc_macro_derive(DynamicGet)]
 pub fn derive_dynamic_get(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
