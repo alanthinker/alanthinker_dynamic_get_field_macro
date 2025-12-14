@@ -3,8 +3,8 @@
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{
-    parse_macro_input, spanned::Spanned, Data, DeriveInput, Fields, FnArg, ImplItemFn, Pat,
-    PatIdent,
+    parse_macro_input, spanned::Spanned, Data, DeriveInput, Fields, FnArg, ImplItem, ImplItemFn,
+    ItemImpl, Pat, PatIdent, Path, Type, TypePath,
 };
 // =======================
 // 宏: DynamicGet
@@ -98,146 +98,153 @@ pub fn derive_dynamic_get(input: TokenStream) -> TokenStream {
 /// 或者：
 /// #[dynamic_method(StructName)]
 /// pub fn method_name(&mut self, ...) -> ... { ... }
+// 新宏: #[dynamic_methods] 应用于impl块
 #[proc_macro_attribute]
-pub fn dynamic_method(args: TokenStream, input: TokenStream) -> TokenStream {
-    let struct_name: syn::Ident = parse_macro_input!(args as syn::Ident);
-    let method = parse_macro_input!(input as ImplItemFn);
-    let method_name = &method.sig.ident;
-    let sig = &method.sig;
-    // 检查是否有接收器（self）
-    let has_receiver = sig
-        .inputs
-        .iter()
-        .any(|arg| matches!(arg, FnArg::Receiver(_)));
-    if !has_receiver {
-        return syn::Error::new_spanned(
-            &method.sig.ident,
-            "dynamic_method can only be used on methods (functions with self)",
-        )
-        .to_compile_error()
-        .into();
-    }
-    // 确定接收器类型：是否为 &mut self
-    let mut needs_mut = false;
-    let mut found_self = false;
-    for arg in &sig.inputs {
-        if let FnArg::Receiver(receiver) = arg {
-            found_self = true;
-            needs_mut = receiver.mutability.is_some();
-            break; // 只关心第一个参数（应该是self）
+pub fn dynamic_methods(_attr: TokenStream, input: TokenStream) -> TokenStream {
+    let mut impl_block = parse_macro_input!(input as ItemImpl);
+
+    // 从impl块推导结构体名（类型）
+    let struct_type = match &*impl_block.self_ty {
+        Type::Path(TypePath {
+            path: Path { segments, .. },
+            ..
+        }) if segments.len() == 1 => {
+            let segment = &segments[0];
+            segment.ident.clone()
         }
-    }
-    if !found_self {
-        return syn::Error::new_spanned(
-            &method.sig.ident,
-            "Method must have self as the first parameter",
-        )
-        .to_compile_error()
-        .into();
-    }
-    // 生成唯一 const 名
-    let const_ident = syn::Ident::new(
-        &format!("__DYNAMIC_METHOD_{}_{}", struct_name, method_name)
-            .replace("-", "_")
-            .to_uppercase(),
-        method_name.span(),
-    );
-    // 解析参数：跳过 self，只处理显式参数
-    let mut arg_downcasts = Vec::new();
-    let mut call_args = Vec::new();
-    let mut arg_index = 0usize;
-    for arg in &sig.inputs {
-        match arg {
-            // 跳过 self 参数
-            FnArg::Receiver(_) => continue,
-            FnArg::Typed(pat_type) => {
-                let ty = &*pat_type.ty;
-                let temp_var = syn::Ident::new(&format!("__arg_{}", arg_index), pat_type.span());
-                // 只支持简单 ident 或 _
-                if let Pat::Ident(PatIdent { ident, .. }) = &*pat_type.pat {
-                    if ident == "_" {
-                        arg_downcasts.push(quote! {
-                            let _: Option<&#ty> = args.get(#arg_index).and_then(|a| a.downcast_ref());
-                        });
-                    } else {
-                        arg_downcasts.push(quote! {
-                            let Some(#temp_var): Option<&#ty> = args.get(#arg_index).and_then(|a| a.downcast_ref()) else {
-                                return None;
-                            };
-                        });
-                        call_args.push(quote! { #temp_var.clone() });
-                    }
-                } else {
-                    return syn::Error::new_spanned(
-                        &pat_type.pat,
-                        "Only simple identifiers (_) are supported in function args",
-                    )
-                    .to_compile_error()
-                    .into();
-                }
-                arg_index += 1;
-            }
+        _ => {
+            return syn::Error::new_spanned(&impl_block.self_ty, "Expected simple struct type")
+                .to_compile_error()
+                .into()
         }
-    }
-    // 返回类型
-    let _ret_ty = match &sig.output {
-        syn::ReturnType::Default => quote!(()),
-        syn::ReturnType::Type(_, ty) => quote!(#ty),
     };
-    // 原始方法定义
-    let item = &method;
-    // 根据方法类型生成不同的代码
-    if needs_mut {
-        // 可变方法
-        let expanded = quote! {
-            #item
-            const #const_ident: () = {
-                use ::alanthinker_dynamic_get_field_trait::{MethodInfo, MethodKind};
-                use ::inventory;
-                inventory::submit! {
-                    MethodInfo {
-                        type_id: std::any::TypeId::of::<#struct_name>(),
-                        name: stringify!(#method_name),
-                        kind: MethodKind::Mutable {
-                            call: move |obj: &mut dyn ::std::any::Any, args: &[&dyn ::std::any::Any]| -> Option<Box<dyn ::std::any::Any>> {
-                                #(#arg_downcasts)*
-                                if let Some(this) = obj.downcast_mut::<#struct_name>() {
-                                    let result = this.#method_name(#(#call_args),*);
-                                    return Some(Box::new(result));
-                                }
-                                None
-                            }
+
+    // 遍历impl块中的所有项，找到方法并为每个生成注册代码
+    let mut registrations = Vec::new();
+    for item in &mut impl_block.items {
+        if let ImplItem::Fn(method) = item {
+            // 复制方法签名等
+            let method_name = &method.sig.ident;
+            let sig = &method.sig;
+
+            // 检查是否有self（必须是方法）
+            let has_receiver = sig
+                .inputs
+                .iter()
+                .any(|arg| matches!(arg, FnArg::Receiver(_)));
+            if !has_receiver {
+                continue; // 跳过非方法
+            }
+
+            // 确定是否mut self
+            let mut needs_mut = false;
+            if let Some(FnArg::Receiver(receiver)) = sig.inputs.first() {
+                needs_mut = receiver.mutability.is_some();
+            }
+
+            // 生成唯一const名
+            let const_ident = syn::Ident::new(
+                &format!("__DYNAMIC_METHOD_{}_{}", struct_type, method_name)
+                    .replace("-", "_")
+                    .to_uppercase(),
+                method_name.span(),
+            );
+
+            // 解析参数（类似你的原代码，跳过self）
+            let mut arg_downcasts = Vec::new();
+            let mut call_args = Vec::new();
+            let mut arg_index = 0usize;
+            for arg in sig.inputs.iter().skip(1) {
+                // 跳过self
+                if let FnArg::Typed(pat_type) = arg {
+                    let ty = &*pat_type.ty;
+                    let temp_var =
+                        syn::Ident::new(&format!("__arg_{}", arg_index), pat_type.span());
+                    if let Pat::Ident(PatIdent { ident, .. }) = &*pat_type.pat {
+                        if ident == "_" {
+                            arg_downcasts.push(quote! {
+                                let _: Option<&#ty> = args.get(#arg_index).and_then(|a| a.downcast_ref());
+                            });
+                        } else {
+                            arg_downcasts.push(quote! {
+                                let Some(#temp_var): Option<&#ty> = args.get(#arg_index).and_then(|a| a.downcast_ref()) else {
+                                    return None;
+                                };
+                            });
+                            call_args.push(quote! { #temp_var.clone() });
                         }
+                    } else {
+                        // 错误处理
+                        return syn::Error::new_spanned(
+                            &pat_type.pat,
+                            "Only simple identifiers or _ supported",
+                        )
+                        .to_compile_error()
+                        .into();
                     }
-                };
-            };
-        };
-        TokenStream::from(expanded)
-    } else {
-        // 不可变方法
-        let expanded = quote! {
-            #item
-            const #const_ident: () = {
-                use ::alanthinker_dynamic_get_field_trait::{MethodInfo, MethodKind};
-                use ::inventory;
-                inventory::submit! {
-                    MethodInfo {
-                        type_id: std::any::TypeId::of::<#struct_name>(),
-                        name: stringify!(#method_name),
-                        kind: MethodKind::Immutable {
-                            call: move |obj: &dyn ::std::any::Any, args: &[&dyn ::std::any::Any]| -> Option<Box<dyn ::std::any::Any>> {
-                                #(#arg_downcasts)*
-                                if let Some(this) = obj.downcast_ref::<#struct_name>() {
-                                    let result = this.#method_name(#(#call_args),*);
-                                    return Some(Box::new(result));
+                    arg_index += 1;
+                }
+            }
+
+            // 生成注册代码
+            let registration = if needs_mut {
+                quote! {
+                    const #const_ident: () = {
+                        use ::alanthinker_dynamic_get_field_trait::{MethodInfo, MethodKind};
+                        use ::inventory;
+                        inventory::submit! {
+                            MethodInfo {
+                                type_id: std::any::TypeId::of::<#struct_type>(),
+                                name: stringify!(#method_name),
+                                kind: MethodKind::Mutable {
+                                    call: move |obj: &mut dyn ::std::any::Any, args: &[&dyn ::std::any::Any]| -> Option<Box<dyn ::std::any::Any>> {
+                                        #(#arg_downcasts)*
+                                        if let Some(this) = obj.downcast_mut::<#struct_type>() {
+                                            let result = this.#method_name(#(#call_args),*);
+                                            return Some(Box::new(result));
+                                        }
+                                        None
+                                    }
                                 }
-                                None
                             }
-                        }
-                    }
-                };
+                        };
+                    };
+                }
+            } else {
+                quote! {
+                    const #const_ident: () = {
+                        use ::alanthinker_dynamic_get_field_trait::{MethodInfo, MethodKind};
+                        use ::inventory;
+                        inventory::submit! {
+                            MethodInfo {
+                                type_id: std::any::TypeId::of::<#struct_type>(),
+                                name: stringify!(#method_name),
+                                kind: MethodKind::Immutable {
+                                    call: move |obj: &dyn ::std::any::Any, args: &[&dyn ::std::any::Any]| -> Option<Box<dyn ::std::any::Any>> {
+                                        #(#arg_downcasts)*
+                                        if let Some(this) = obj.downcast_ref::<#struct_type>() {
+                                            let result = this.#method_name(#(#call_args),*);
+                                            return Some(Box::new(result));
+                                        }
+                                        None
+                                    }
+                                }
+                            }
+                        };
+                    };
+                }
             };
-        };
-        TokenStream::from(expanded)
+
+            // 将注册代码注入到方法后（作为const项）
+            registrations.push(registration);
+        }
     }
+
+    // 生成扩展后的impl块：原impl + 注册代码
+    let expanded = quote! {
+        #impl_block
+        #(#registrations)*
+    };
+
+    TokenStream::from(expanded)
 }
