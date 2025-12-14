@@ -10,6 +10,7 @@ use syn::{
 // 1. derive 宏: DynamicGet
 // =======================
 
+// 然后宏实现：
 #[proc_macro_derive(DynamicGet)]
 pub fn derive_dynamic_get(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -33,18 +34,21 @@ pub fn derive_dynamic_get(input: TokenStream) -> TokenStream {
 
     let mut get_field_match_arms = Vec::new();
     let mut has_field_match_arms = Vec::new();
+    let mut field_names_vec = Vec::new();
 
     for field in fields {
-        let field_name = field.ident.as_ref().unwrap();
-        let field_name_str = field_name.to_string();
+        let field_ident = field.ident.as_ref().unwrap();
+        let field_name_str = field_ident.to_string();
 
         get_field_match_arms.push(quote! {
-            #field_name_str => Some(&self.#field_name as &dyn std::any::Any)
+            #field_name_str => Some(&self.#field_ident as &dyn std::any::Any)
         });
 
         has_field_match_arms.push(quote! {
             #field_name_str => true
         });
+
+        field_names_vec.push(field_name_str);
     }
 
     let expanded = quote! {
@@ -61,6 +65,12 @@ pub fn derive_dynamic_get(input: TokenStream) -> TokenStream {
                     #(#has_field_match_arms,)*
                     _ => false,
                 }
+            }
+
+            fn field_names(&self) -> Vec<String> {
+                vec![
+                    #( #field_names_vec.to_string(), )*
+                ]
             }
         }
     };
