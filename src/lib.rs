@@ -105,12 +105,14 @@ pub fn dynamic_methods(_attr: TokenStream, input: TokenStream) -> TokenStream {
 
     // 从impl块推导结构体名（类型）
     let struct_type = match &*impl_block.self_ty {
-        Type::Path(TypePath {
-            path: Path { segments, .. },
-            ..
-        }) if segments.len() == 1 => {
-            let segment = &segments[0];
-            segment.ident.clone()
+        Type::Path(type_path) => {
+            if let Some(segment) = type_path.path.segments.last() {
+                segment.ident.clone()
+            } else {
+                return syn::Error::new_spanned(&impl_block.self_ty, "Expected simple struct type")
+                    .to_compile_error()
+                    .into();
+            }
         }
         _ => {
             return syn::Error::new_spanned(&impl_block.self_ty, "Expected simple struct type")
@@ -127,19 +129,17 @@ pub fn dynamic_methods(_attr: TokenStream, input: TokenStream) -> TokenStream {
             let method_name = &method.sig.ident;
             let sig = &method.sig;
 
-            // 检查是否有self（必须是方法）
-            let has_receiver = sig
+            // 检查是否有self
+            let receiver = sig.inputs.first();
+            let is_static = !sig
                 .inputs
                 .iter()
                 .any(|arg| matches!(arg, FnArg::Receiver(_)));
-            if !has_receiver {
-                continue; // 跳过非方法
-            }
-
-            // 确定是否mut self
             let mut needs_mut = false;
-            if let Some(FnArg::Receiver(receiver)) = sig.inputs.first() {
-                needs_mut = receiver.mutability.is_some();
+            if !is_static {
+                if let Some(FnArg::Receiver(r)) = receiver {
+                    needs_mut = r.mutability.is_some();
+                }
             }
 
             // 生成唯一const名
@@ -150,12 +150,12 @@ pub fn dynamic_methods(_attr: TokenStream, input: TokenStream) -> TokenStream {
                 method_name.span(),
             );
 
-            // 解析参数（类似你的原代码，跳过self）
+            // 解析参数：对于静态，从第一个参数开始；对于实例，跳过self
             let mut arg_downcasts = Vec::new();
             let mut call_args = Vec::new();
             let mut arg_index = 0usize;
-            for arg in sig.inputs.iter().skip(1) {
-                // 跳过self
+            let start_index = if is_static { 0 } else { 1 };
+            for arg in sig.inputs.iter().skip(start_index) {
                 if let FnArg::Typed(pat_type) = arg {
                     let ty = &*pat_type.ty;
                     let temp_var =
@@ -174,7 +174,6 @@ pub fn dynamic_methods(_attr: TokenStream, input: TokenStream) -> TokenStream {
                             call_args.push(quote! { #temp_var.clone() });
                         }
                     } else {
-                        // 错误处理
                         return syn::Error::new_spanned(
                             &pat_type.pat,
                             "Only simple identifiers or _ supported",
@@ -186,8 +185,28 @@ pub fn dynamic_methods(_attr: TokenStream, input: TokenStream) -> TokenStream {
                 }
             }
 
-            // 生成注册代码
-            let registration = if needs_mut {
+            // 生成注册代码，根据类型
+            let registration = if is_static {
+                quote! {
+                    const #const_ident: () = {
+                        use ::alanthinker_dynamic_get_field_trait::{MethodInfo, MethodKind};
+                        use ::inventory;
+                        inventory::submit! {
+                            MethodInfo {
+                                type_id: std::any::TypeId::of::<#struct_type>(),
+                                name: stringify!(#method_name),
+                                kind: MethodKind::Static {
+                                    call: move |args: &[&dyn ::std::any::Any]| -> Option<Box<dyn ::std::any::Any>> {
+                                        #(#arg_downcasts)*
+                                        let result = #struct_type::#method_name(#(#call_args),*);
+                                        Some(Box::new(result))
+                                    }
+                                }
+                            }
+                        };
+                    };
+                }
+            } else if needs_mut {
                 quote! {
                     const #const_ident: () = {
                         use ::alanthinker_dynamic_get_field_trait::{MethodInfo, MethodKind};
@@ -235,7 +254,6 @@ pub fn dynamic_methods(_attr: TokenStream, input: TokenStream) -> TokenStream {
                 }
             };
 
-            // 将注册代码注入到方法后（作为const项）
             registrations.push(registration);
         }
     }
