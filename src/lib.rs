@@ -3,8 +3,8 @@
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{
-    parse_macro_input, spanned::Spanned, Data, DeriveInput, Fields, FnArg, ImplItem, ImplItemFn,
-    ItemImpl, Pat, PatIdent, Path, Type, TypePath,
+    parse_macro_input, spanned::Spanned, Data, DeriveInput, Fields, FnArg, ImplItem,
+    ItemImpl, Pat, PatIdent, Type,
 };
 // =======================
 // 宏: DynamicGet
@@ -76,6 +76,25 @@ pub fn derive_dynamic_get(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
+
+fn to_snake_case(s: &str) -> String {
+    let mut result = String::new();
+    let mut chars = s.chars().peekable();
+    
+    while let Some(c) = chars.next() {
+        if c.is_uppercase() {
+            if !result.is_empty() && !result.ends_with('_') {
+                result.push('_');
+            }
+            result.push(c.to_lowercase().next().unwrap());
+        } else {
+            result.push(c);
+        }
+    }
+    
+    result
+}
+
 // 新宏: #[dynamic_methods] 应用于impl块
 #[proc_macro_attribute]
 pub fn dynamic_methods(_attr: TokenStream, input: TokenStream) -> TokenStream {
@@ -125,8 +144,10 @@ pub fn dynamic_methods(_attr: TokenStream, input: TokenStream) -> TokenStream {
             );
 
             // 生成唯一的包装器函数名
+            let snake_struct_type = to_snake_case(&struct_type.to_string());
+            let snake_method_name = to_snake_case(&method_name.to_string());
             let wrapper_name = syn::Ident::new(
-                &format!("__wrapper_{}_{}", struct_type, method_name),
+                &format!("__wrapper_{}_{}", snake_struct_type, snake_method_name),
                 method_name.span(),
             );
 
@@ -170,7 +191,7 @@ pub fn dynamic_methods(_attr: TokenStream, input: TokenStream) -> TokenStream {
                         }
                     };
                     
-                    if let Pat::Ident(PatIdent { ident, .. }) = &*pat_type.pat {
+                    if let Pat::Ident(PatIdent { ident: _, .. }) = &*pat_type.pat {
                         arg_downcasts.push(quote! {
                             let #temp_var = args.get(#arg_index)
                                 .ok_or_else(|| ::anyhow::anyhow!("Missing argument {} for method '{}'", #arg_index, stringify!(#method_name)))?
