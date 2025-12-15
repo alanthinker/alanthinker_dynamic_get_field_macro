@@ -9,7 +9,7 @@ use syn::{
 // =======================
 // 宏: DynamicGet
 // =======================
-#[proc_macro_derive(DynamicGet)]
+#[proc_macro_derive(dynamic_fields)]
 pub fn derive_dynamic_get(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let struct_name = &input.ident;
