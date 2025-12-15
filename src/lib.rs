@@ -136,6 +136,18 @@ pub fn dynamic_methods(_attr: TokenStream, input: TokenStream) -> TokenStream {
                 }
             }
 
+            // 获取所有原始参数名
+            let mut param_names = Vec::new();
+            let start_index = if is_static { 0 } else { 1 };
+            
+            for arg in sig.inputs.iter().skip(start_index) {
+                if let FnArg::Typed(pat_type) = arg {
+                    if let Pat::Ident(PatIdent { ident, .. }) = &*pat_type.pat {
+                        param_names.push(ident.clone());
+                    }
+                }
+            }
+
             let const_ident = syn::Ident::new(
                 &format!("__DYNAMIC_METHOD_{}_{}", struct_type, method_name)
                     .replace("-", "_")
@@ -156,11 +168,15 @@ pub fn dynamic_methods(_attr: TokenStream, input: TokenStream) -> TokenStream {
             let mut arg_index = 0usize;
             let start_index = if is_static { 0 } else { 1 };
 
-            for arg in sig.inputs.iter().skip(start_index) {
+            for (_i, (arg, param_name)) in sig.inputs.iter().skip(start_index)
+                .zip(param_names.iter()).enumerate() 
+            {
                 if let FnArg::Typed(pat_type) = arg {
                     let ty = &pat_type.ty;
+                    let param_name_str = param_name.to_string();
+
                     let temp_var =
-                        syn::Ident::new(&format!("__arg_{}", arg_index), pat_type.span());
+                        syn::Ident::new(&format!("{}_in_{}", param_name_str, method_name), pat_type.span());
                     
                     let (downcast_ty, arg_expr) = match &**ty {
                         Type::Reference(type_ref) => {
@@ -184,7 +200,7 @@ pub fn dynamic_methods(_attr: TokenStream, input: TokenStream) -> TokenStream {
                         _ => {
                             return syn::Error::new_spanned(
                                 ty,
-                                format!("Unsupported argument type for method '{}'", method_name)
+                                format!(r#"Unsupported argument type for method "{}""#, method_name)
                             )
                             .to_compile_error()
                             .into();
@@ -194,11 +210,12 @@ pub fn dynamic_methods(_attr: TokenStream, input: TokenStream) -> TokenStream {
                     if let Pat::Ident(PatIdent { ident: _, .. }) = &*pat_type.pat {
                         arg_downcasts.push(quote! {
                             let #temp_var = args.get(#arg_index)
-                                .ok_or_else(|| ::anyhow::anyhow!("Missing argument {} for method '{}'", #arg_index, stringify!(#method_name)))?
+                                .ok_or_else(|| ::anyhow::anyhow!(r#"Missing argument name: "{}" in index: {} for method: "{}""#, #param_name_str, #arg_index, stringify!(#method_name)))?
                                 .downcast_ref::<#downcast_ty>()
                                 .ok_or_else(|| ::anyhow::anyhow!(
-                                    "Argument {} for method '{}' must be of type '{}'", 
-                                    #arg_index, 
+                                    r#"Argument name: "{}" in index: {} for method: "{}" must be of type: "&{}""#, 
+                                    #param_name_str, 
+                                    #arg_index,
                                     stringify!(#method_name), 
                                     std::any::type_name::<#downcast_ty>()
                                 ))?;
@@ -230,7 +247,7 @@ pub fn dynamic_methods(_attr: TokenStream, input: TokenStream) -> TokenStream {
                     fn #wrapper_name(obj: &mut dyn ::std::any::Any, args: &[&dyn ::std::any::Any]) -> ::anyhow::Result<Box<dyn ::std::any::Any>> {
                         #(#arg_downcasts)*
                         let this = obj.downcast_mut::<#struct_type>()
-                            .ok_or_else(|| ::anyhow::anyhow!("Failed to downcast object to type '{}'", std::any::type_name::<#struct_type>()))?;
+                            .ok_or_else(|| ::anyhow::anyhow!(r#"Failed to downcast object to type "{}""#, std::any::type_name::<#struct_type>()))?;
                         let result = this.#method_name(#(#call_args),*);
                         Ok(Box::new(result))
                     }
@@ -240,7 +257,7 @@ pub fn dynamic_methods(_attr: TokenStream, input: TokenStream) -> TokenStream {
                     fn #wrapper_name(obj: &dyn ::std::any::Any, args: &[&dyn ::std::any::Any]) -> ::anyhow::Result<Box<dyn ::std::any::Any>> {
                         #(#arg_downcasts)*
                         let this = obj.downcast_ref::<#struct_type>()
-                            .ok_or_else(|| ::anyhow::anyhow!("Failed to downcast object to type '{}'", std::any::type_name::<#struct_type>()))?;
+                            .ok_or_else(|| ::anyhow::anyhow!(r#"Failed to downcast object to type "{}""#, std::any::type_name::<#struct_type>()))?;
                         let result = this.#method_name(#(#call_args),*);
                         Ok(Box::new(result))
                     }
