@@ -124,6 +124,12 @@ pub fn dynamic_methods(_attr: TokenStream, input: TokenStream) -> TokenStream {
                 method_name.span(),
             );
 
+            // 生成唯一的包装器函数名
+            let wrapper_name = syn::Ident::new(
+                &format!("__wrapper_{}_{}", struct_type, method_name),
+                method_name.span(),
+            );
+
             let mut arg_downcasts = Vec::new();
             let mut call_args = Vec::new();
             let mut arg_index = 0usize;
@@ -131,17 +137,53 @@ pub fn dynamic_methods(_attr: TokenStream, input: TokenStream) -> TokenStream {
 
             for arg in sig.inputs.iter().skip(start_index) {
                 if let FnArg::Typed(pat_type) = arg {
-                    let ty = &*pat_type.ty;
+                    let ty = &pat_type.ty;
                     let temp_var =
                         syn::Ident::new(&format!("__arg_{}", arg_index), pat_type.span());
+                    
+                    let (downcast_ty, arg_expr) = match &**ty {
+                        Type::Reference(type_ref) => {
+                            let inner_ty = &type_ref.elem;
+                            let downcast_ty = quote! { #inner_ty };
+                            
+                            let arg_expr = if type_ref.mutability.is_some() {
+                                quote! { &mut #temp_var }
+                            } else {
+                                quote! { &#temp_var }
+                            };
+                            
+                            (downcast_ty, arg_expr)
+                        }
+                        Type::Path(_) | Type::Tuple(_) | Type::Array(_) | Type::Slice(_) => {
+                            let downcast_ty = quote! { #ty };
+                            let arg_expr = quote! { * #temp_var };
+                            
+                            (downcast_ty, arg_expr)
+                        }
+                        _ => {
+                            return syn::Error::new_spanned(
+                                ty,
+                                format!("Unsupported argument type for method '{}'", method_name)
+                            )
+                            .to_compile_error()
+                            .into();
+                        }
+                    };
+                    
                     if let Pat::Ident(PatIdent { ident, .. }) = &*pat_type.pat {
                         arg_downcasts.push(quote! {
                             let #temp_var = args.get(#arg_index)
                                 .ok_or_else(|| ::anyhow::anyhow!("Missing argument {} for method '{}'", #arg_index, stringify!(#method_name)))?
-                                .downcast_ref::<#ty>()
-                                .ok_or_else(|| ::anyhow::anyhow!("Argument {} for method '{}' must be of type '{}'", #arg_index, stringify!(#method_name), std::any::type_name::<#ty>()))?;
+                                .downcast_ref::<#downcast_ty>()
+                                .ok_or_else(|| ::anyhow::anyhow!(
+                                    "Argument {} for method '{}' must be of type '{}'", 
+                                    #arg_index, 
+                                    stringify!(#method_name), 
+                                    std::any::type_name::<#downcast_ty>()
+                                ))?;
                         });
-                        call_args.push(quote! { *#temp_var });
+                        call_args.push(arg_expr);
+                        arg_index += 1;
                     } else {
                         return syn::Error::new_spanned(
                             &pat_type.pat,
@@ -150,13 +192,44 @@ pub fn dynamic_methods(_attr: TokenStream, input: TokenStream) -> TokenStream {
                         .to_compile_error()
                         .into();
                     }
-                    arg_index += 1;
                 }
             }
 
-            let registration = if is_static {
-                // 静态方法 - 需要处理 `get_static(&Object1, i32)` 这种情况
+            // 生成包装器函数而不是直接使用闭包
+            let wrapper = if is_static {
                 quote! {
+                    fn #wrapper_name(args: &[&dyn ::std::any::Any]) -> ::anyhow::Result<Box<dyn ::std::any::Any>> {
+                        #(#arg_downcasts)*
+                        let result = #struct_type::#method_name(#(#call_args),*);
+                        Ok(Box::new(result))
+                    }
+                }
+            } else if needs_mut {
+                quote! {
+                    fn #wrapper_name(obj: &mut dyn ::std::any::Any, args: &[&dyn ::std::any::Any]) -> ::anyhow::Result<Box<dyn ::std::any::Any>> {
+                        #(#arg_downcasts)*
+                        let this = obj.downcast_mut::<#struct_type>()
+                            .ok_or_else(|| ::anyhow::anyhow!("Failed to downcast object to type '{}'", std::any::type_name::<#struct_type>()))?;
+                        let result = this.#method_name(#(#call_args),*);
+                        Ok(Box::new(result))
+                    }
+                }
+            } else {
+                quote! {
+                    fn #wrapper_name(obj: &dyn ::std::any::Any, args: &[&dyn ::std::any::Any]) -> ::anyhow::Result<Box<dyn ::std::any::Any>> {
+                        #(#arg_downcasts)*
+                        let this = obj.downcast_ref::<#struct_type>()
+                            .ok_or_else(|| ::anyhow::anyhow!("Failed to downcast object to type '{}'", std::any::type_name::<#struct_type>()))?;
+                        let result = this.#method_name(#(#call_args),*);
+                        Ok(Box::new(result))
+                    }
+                }
+            };
+
+            let registration = if is_static {
+                quote! {
+                    #wrapper
+                    
                     const #const_ident: () = {
                         use ::alanthinker_dynamic_get_field_trait::{MethodInfo, MethodKind};
                         use ::inventory;
@@ -165,19 +238,16 @@ pub fn dynamic_methods(_attr: TokenStream, input: TokenStream) -> TokenStream {
                                 type_id: std::any::TypeId::of::<#struct_type>(),
                                 name: stringify!(#method_name),
                                 kind: MethodKind::Static {
-                                    call: move |args: &[&dyn ::std::any::Any]| -> ::anyhow::Result<Box<dyn ::std::any::Any>> {
-                                        #(#arg_downcasts)*
-                                        let result = #struct_type::#method_name(#(#call_args),*);
-                                        Ok(Box::new(result))
-                                    }
+                                    call: #wrapper_name
                                 }
                             }
                         };
                     };
                 }
             } else if needs_mut {
-                // 可变方法
                 quote! {
+                    #wrapper
+                    
                     const #const_ident: () = {
                         use ::alanthinker_dynamic_get_field_trait::{MethodInfo, MethodKind};
                         use ::inventory;
@@ -186,21 +256,16 @@ pub fn dynamic_methods(_attr: TokenStream, input: TokenStream) -> TokenStream {
                                 type_id: std::any::TypeId::of::<#struct_type>(),
                                 name: stringify!(#method_name),
                                 kind: MethodKind::Mutable {
-                                    call: move |obj: &mut dyn ::std::any::Any, args: &[&dyn ::std::any::Any]| -> ::anyhow::Result<Box<dyn ::std::any::Any>> {
-                                        #(#arg_downcasts)*
-                                        let this = obj.downcast_mut::<#struct_type>()
-                                            .ok_or_else(|| ::anyhow::anyhow!("Failed to downcast object to type '{}'", std::any::type_name::<#struct_type>()))?;
-                                        let result = this.#method_name(#(#call_args),*);
-                                        Ok(Box::new(result))
-                                    }
+                                    call: #wrapper_name
                                 }
                             }
                         };
                     };
                 }
             } else {
-                // 不可变方法 - 处理 `operation(&self, &Object1, i32)` 这种情况
                 quote! {
+                    #wrapper
+                    
                     const #const_ident: () = {
                         use ::alanthinker_dynamic_get_field_trait::{MethodInfo, MethodKind};
                         use ::inventory;
@@ -209,13 +274,7 @@ pub fn dynamic_methods(_attr: TokenStream, input: TokenStream) -> TokenStream {
                                 type_id: std::any::TypeId::of::<#struct_type>(),
                                 name: stringify!(#method_name),
                                 kind: MethodKind::Immutable {
-                                    call: move |obj: &dyn ::std::any::Any, args: &[&dyn ::std::any::Any]| -> ::anyhow::Result<Box<dyn ::std::any::Any>> {
-                                        #(#arg_downcasts)*
-                                        let this = obj.downcast_ref::<#struct_type>()
-                                            .ok_or_else(|| ::anyhow::anyhow!("Failed to downcast object to type '{}'", std::any::type_name::<#struct_type>()))?;
-                                        let result = this.#method_name(#(#call_args),*);
-                                        Ok(Box::new(result))
-                                    }
+                                    call: #wrapper_name
                                 }
                             }
                         };
