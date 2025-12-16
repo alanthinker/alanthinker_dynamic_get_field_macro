@@ -1,0 +1,15 @@
+[package]
+name = "test_dynamic"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+alanthinker_dynamic_get_field_trait = {workspace = true} 
+# alanthinker_dynamic_get_field_trait = {path="../../../alanthinker_dynamic_get_field_trait"}
+
+alanthinker_dynamic_get_field_macro = {path="../.."}
+
+inventory = "*"
+anyhow = "*"
+
