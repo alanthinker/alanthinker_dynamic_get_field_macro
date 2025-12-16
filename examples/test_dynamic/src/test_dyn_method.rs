@@ -83,7 +83,7 @@ fn test_call_method1() -> Result<()> {
 
     // 测试可变调用
     let mut calc = Calculator { value: 21 };
-    call::call_void("set_value", &mut calc, &[&100])?;
+    call::call_mut("set_value", &mut calc, &[&100])?;
     assert_eq!(calc.value, 100);
 
     // 测试带参数调用
@@ -107,10 +107,15 @@ fn test_call_method1() -> Result<()> {
     assert_eq!(result, 53);
 
     let ob1 = Rc::new(RefCell::new(Object1 { value: 53 }));
-    let result = call::call_and_downcast::<Calculator, i32>("operation_change_arg_value", &calc, &[&ob1, &26])?;
+    let result = call::call_and_downcast::<Calculator, i32>(
+        "operation_change_arg_value",
+        &calc,
+        &[&ob1, &26],
+    )?;
     assert_eq!(result, 229);
 
-    let result = call::call_static_and_downcast::<Calculator, i32>("static_change_arg_value", &[&ob1, &26])?;
+    let result =
+        call::call_static_and_downcast::<Calculator, i32>("static_change_arg_value", &[&ob1, &26])?;
     assert_eq!(result, 255);
 
     Ok(())
@@ -170,7 +175,7 @@ fn test_call_method2() -> Result<()> {
 
     // 测试可变调用
     let mut calc = Calculator2 { value: 21 };
-    call::call_void("set_value", &mut calc, &[&100])?;
+    call::call_mut("set_value", &mut calc, &[&100])?;
     assert_eq!(calc.value, 100);
 
     // 测试带参数调用
@@ -193,7 +198,9 @@ fn test_util() -> Result<()> {
     let calc = Calculator { value: 10 };
 
     // 测试链式调用
-    let chain = util::MethodChain::new(&calc).call("get_value", vec![]).call("get_value", vec![]);
+    let chain = util::MethodChain::new(&calc)
+        .call("get_value", vec![])
+        .call("get_value", vec![]);
 
     let results = chain.execute()?;
     assert_eq!(results.len(), 2);
@@ -255,7 +262,11 @@ fn test_error_handling() -> Result<()> {
     assert!(result.is_err());
 
     // 测试批量调用中的错误传播
-    let calls = vec![("get_value", vec![] as Vec<&dyn Any>), ("non_existent", vec![]), ("get_value", vec![])];
+    let calls = vec![
+        ("get_value", vec![] as Vec<&dyn Any>),
+        ("non_existent", vec![]),
+        ("get_value", vec![]),
+    ];
 
     let result = util::batch_call(&calc, &calls);
     assert!(result.is_err());
