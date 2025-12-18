@@ -19,6 +19,17 @@ struct Calculator {
     value: i32,
 }
 
+// 不希望被宏影响的方法放在没有被 #[dynamic_methods] 标记的 impl 块中
+impl Calculator {
+    pub fn some_fn(&self) {
+        //
+    }
+}
+
+// 被 #[dynamic_methods] 标记的 impl 快中, 每个方法都可以被动态调用.
+// 目前对方法有2个限制,
+// 1. 参数如果没实现 Copy, 那么就只能用引用传递. 如果确实想传递变量, 可以考虑用 &Rc<RefCell<T>> 或者 &Arc<Mutex<T>>
+// 2. 除了 &mut self 外, 其他所有参数不能为 mut. 如果确实有这个需求, 用 &Rc<RefCell<T>> 或者 &Arc<Mutex<T>
 #[dynamic_methods]
 impl Calculator {
     pub fn get_value(&self) -> i32 {
@@ -37,7 +48,7 @@ impl Calculator {
         self.value
     }
 
-    // //注意, 除了 self 参数, 其他参数如果没实现 Copy, 那么就只能用引用传递. 如果确实想传递变量, 可以考虑用 &Rc<RefCell<T>> 或者 &Arc<Mutex<T>>
+    // //注意, 参数如果没实现 Copy, 那么就只能用引用传递. 如果确实想传递变量, 可以考虑用 &Rc<RefCell<T>> 或者 &Arc<Mutex<T>>
     // pub fn operation_abc(&self, ob: Object1, x: i32) -> i32 {
     //     println!("Calculator add called");
     //     //self.value += x;
@@ -50,7 +61,7 @@ impl Calculator {
         ob.value
     }
 
-    //  宏 dynamic_methods, 除了  &mut self 外, 支持 mut 参数的难度极高, 也没必要. 如果确实有这个需求, 用 &Rc<RefCell<T>> 或者 &Arc<Mutex<T>>
+    //  宏 dynamic_methods, 除了 &mut self 外, 支持 mut 参数的难度极高, 也没必要. 如果确实有这个需求, 用 &Rc<RefCell<T>> 或者 &Arc<Mutex<T>>
     pub fn operation_change_arg_value(&self, ob: &Rc<RefCell<Object1>>, x: i32) -> i32 {
         println!("Calculator add called");
         let mut ob = ob.borrow_mut();
